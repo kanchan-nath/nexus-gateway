@@ -1,0 +1,51 @@
+{
+    "listen": {
+        "http": 8080,
+        "https": 8443
+    },
+    "tls": {
+        "cert": "./certs/cert.pem",
+        "key": "./certs/key.pem"
+    },
+    "backends": {
+        "/api": [
+            "http://localhost:4001",
+            "http://localhost:4002"
+        ]
+    },
+    "loadBalancing": "round-robin",
+    "healthCheck": {
+        "path": "/health",
+        "intervalMs": 5000,
+        "timeoutMs": 2000,
+        "unhealthyThreshold": 2
+    },
+    "rateLimit": {
+        "windowMs": 1000,
+        "max": 20
+    },
+    "auth": {
+        "required": true,
+        "apiKeys": [
+            "demo-key-123"
+        ],
+        "hmac": {
+            "enabled": false,
+            "secret": "change-me-dev-secret"
+        }
+    },
+    "wal": {
+        "enabled": true,
+        "path": "./wal.log"
+    },
+    "metrics": {
+        "path": "/nexus/metrics"
+    },
+    "dashboard": {
+        "path": "/nexus/dashboard/stream",
+        "pushIntervalMs": 1000
+    },
+    "logging": {
+        "level": "info"
+    }
+}
