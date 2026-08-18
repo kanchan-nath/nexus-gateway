@@ -15,6 +15,7 @@
  *   All core modules are now integrated:
  *     - router.js for path/host-based routing
  *     - loadbalancer.js for intelligent backend selection
+ *     - healthcheck.js for backend health monitoring
  *     - logger.js for structured logging
  *     - metrics.js for request metrics
  *
@@ -32,6 +33,7 @@ import { createLogger } from './logger.js';
 import { createMetrics } from './metrics.js';
 import { matchRoute } from './router.js';
 import { createLoadBalancer } from './loadbalancer.js';
+import { createHealthChecker } from './healthcheck.js';
 
 // -------------------------------------------------------------------------
 // Forward a single request to a chosen backend and pipe the response back.
@@ -116,11 +118,11 @@ function createRequestHandler(config, logger, metrics, loadBalancer) {
             return;
         }
 
-        // Pick a backend using loadbalancer.js
+        // Pick a backend using loadbalancer.js (skips unhealthy backends automatically)
         const backend = loadBalancer.pickBackend(route);
         if (!backend) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Bad Gateway', detail: `no backends available for ${route}` }));
+            res.end(JSON.stringify({ error: 'Bad Gateway', detail: `no healthy backends available for ${route}` }));
             logger.logRequest(req, 502, startTime);
             metrics.recordRequest({ route, backend: null, statusCode: 502, durationMs: Date.now() - startTime });
             return;
@@ -159,8 +161,8 @@ function createRequestHandler(config, logger, metrics, loadBalancer) {
  * Returns a plain node:http Server instance so the caller (cli.js) decides
  * when/how to call .listen().
  *
- * Also returns the `logger`/`metrics`/`loadBalancer` instances attached
- * to the server object so cli.js or dashboard.js can reuse the SAME
+ * Also returns the `logger`/`metrics`/`loadBalancer`/`healthChecker` instances
+ * attached to the server object so cli.js or dashboard.js can reuse the SAME
  * instances rather than creating their own.
  */
 export function createServer(config) {
@@ -168,18 +170,27 @@ export function createServer(config) {
         throw new Error('createServer: a valid config with "backends" is required');
     }
 
+    // Create core components
     const logger = createLogger(config);
     const metrics = createMetrics();
-    const loadBalancer = createLoadBalancer(config);
 
+    // Create health checker and start it
+    const healthChecker = createHealthChecker(config, logger);
+    healthChecker.start();
+
+    // Create load balancer with health checker integration
+    const loadBalancer = createLoadBalancer(config, healthChecker);
+
+    // Create HTTP server with the request handler
     const server = http.createServer(
         createRequestHandler(config, logger, metrics, loadBalancer)
     );
 
-    // Attach instances to server for reuse
+    // Attach instances to server for reuse by other modules
     server.logger = logger;
     server.metrics = metrics;
     server.loadBalancer = loadBalancer;
+    server.healthChecker = healthChecker;
 
     return server;
 }
@@ -199,7 +210,55 @@ export function startServer(config) {
         server.logger.info(`Nexus listening on http://localhost:${port}`);
         server.logger.info(`Load balancing strategy: ${server.loadBalancer.getStrategy()}`);
         server.logger.info(`Routes configured: ${Object.keys(config.backends).join(', ')}`);
+
+        // Log health checker status
+        const healthyCount = server.healthChecker.getHealthyBackends().length;
+        const totalBackends = server.healthChecker.getStatus().size;
+        server.logger.info(`Health status: ${healthyCount}/${totalBackends} backends healthy`);
     });
 
     return server;
+}
+
+/**
+ * Gracefully shutdown the server and all components.
+ * 
+ * @param {http.Server} server - The running server instance
+ * @param {number} [timeout=5000] - Max time to wait for connections to close
+ * @returns {Promise<void>}
+ */
+export function shutdownServer(server, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+        if (!server || !server.listening) {
+            resolve();
+            return;
+        }
+
+        const logger = server.logger || console;
+        logger.info('Shutting down server...');
+
+        // Stop health checker
+        if (server.healthChecker && typeof server.healthChecker.stop === 'function') {
+            server.healthChecker.stop();
+        }
+
+        // Set timeout for force shutdown
+        const timeoutId = setTimeout(() => {
+            logger.warn('Force closing connections after timeout');
+            server.close(() => {
+                resolve();
+            });
+        }, timeout);
+
+        // Graceful shutdown
+        server.close((err) => {
+            clearTimeout(timeoutId);
+            if (err) {
+                reject(err);
+            } else {
+                logger.info('Server shutdown complete');
+                resolve();
+            }
+        });
+    });
 }
