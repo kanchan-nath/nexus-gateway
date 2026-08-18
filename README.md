@@ -189,7 +189,7 @@ Example `/nexus/metrics` response shape:
 ``` txt
 nexus/
 ├── src/
-│ ├── cli.js → Kanchan [not yet implemented]
+│ ├── cli.js → Kanchan [done]
 │ ├── config.js → Kanchan [done]
 │ ├── server.js → Ashish [done — Phase 1 core, hooks for Phase 2/3]
 │ ├── tls.js → Ashish [not yet implemented]
