@@ -7,10 +7,14 @@
         "cert": "./certs/cert.pem",
         "key": "./certs/key.pem"
     },
+    "hostRouting": false,
     "backends": {
         "/api": [
             "http://localhost:4001",
             "http://localhost:4002"
+        ],
+        "/auth": [
+            "http://localhost:4003"
         ]
     },
     "loadBalancing": "round-robin",
