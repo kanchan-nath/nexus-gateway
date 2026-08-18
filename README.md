@@ -193,7 +193,7 @@ nexus/
 │ ├── config.js → Kanchan [done]
 │ ├── server.js → Ashish [done — Phase 1 core, hooks for Phase 2/3]
 │ ├── tls.js → Ashish [not yet implemented]
-│ ├── router.js → Kanchan [not yet implemented]
+│ ├── router.js → Kanchan [done]
 │ ├── loadbalancer.js → Kanchan [not yet implemented]
 │ ├── healthcheck.js → Kanchan [not yet implemented]
 │ ├── ratelimiter.js → Ashish [not yet implemented]
