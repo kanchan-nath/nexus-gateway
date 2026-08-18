@@ -189,16 +189,16 @@ Example `/nexus/metrics` response shape:
 ``` txt
 nexus/
 ├── src/
-│ ├── cli.js → Kanchan [not yet implemented]
+│ ├── cli.js → Kanchan [done]
 │ ├── config.js → Kanchan [done]
 │ ├── server.js → Ashish [done — Phase 1 core, hooks for Phase 2/3]
 │ ├── tls.js → Ashish [not yet implemented]
-│ ├── router.js → Kanchan [not yet implemented]
-│ ├── loadbalancer.js → Kanchan [not yet implemented]
-│ ├── healthcheck.js → Kanchan [not yet implemented]
+│ ├── router.js → Kanchan [done]
+│ ├── loadbalancer.js → Kanchan [done]
+│ ├── healthcheck.js → Kanchan [done]
 │ ├── ratelimiter.js → Ashish [not yet implemented]
 │ ├── auth.js → Ashish [not yet implemented]
-│ ├── wal.js → Kanchan [not yet implemented]
+│ ├── wal.js → Kanchan [done]
 │ ├── metrics.js → Saikat [done]
 │ ├── logger.js → Saikat [done]
 │ └── dashboard.js → Biyas [not yet implemented]

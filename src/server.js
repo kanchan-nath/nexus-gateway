@@ -11,41 +11,19 @@
  *   Owner: Ashish
  *   Zero-dep substitution: `http` (built-in) replaces Express.
  *
- * CURRENT SCOPE (Phase 1 — Hours 0-12, "Core Skeleton")
- *   Per the build plan, at this stage the only goal is: a request hits
- *   Nexus, gets forwarded to a backend for the matching route, and the
- *   response comes back. Nothing fancy yet. To make that testable today
- *   (before router.js / loadbalancer.js exist), this file contains two
- *   small INTERNAL placeholder helpers:
+ * CURRENT SCOPE (Phase 4 — Full Integration)
+ *   All core modules are now integrated:
+ *     - router.js for path/host-based routing
+ *     - loadbalancer.js for intelligent backend selection
+ *     - healthcheck.js for backend health monitoring
+ *     - logger.js for structured logging
+ *     - metrics.js for request metrics
+ *     - wal.js for write-ahead logging (durability)
  *
- *     - matchRoute()   -> temporary stand-in for src/router.js
- *     - pickBackend()  -> temporary stand-in for src/loadbalancer.js
- *
- *   These are intentionally isolated at the top of the file so that once
- *   Kanchan's router.js / loadbalancer.js modules exist, we delete these
- *   two functions and import the real ones instead — nothing else in
- *   this file needs to change.
- *
- * WIRING LOG (who changed what, so nobody overwrites each other)
- *   [Saikat] Wired in src/logger.js and src/metrics.js in place of the
- *   old inline logRequest() placeholder:
- *     - logger.js replaces logRequest() — same call site, same info.
- *     - metrics.js is mounted at config.metrics.path (GET returns JSON)
- *       AND records every completed request (route, backend, status,
- *       duration) via metrics.recordRequest() on the 'finish' event.
- *   Ashish/Kanchan: if you touch the request pipeline (auth, rate limit,
- *   WAL), please keep the existing `logger`/`metrics` instances flowing
- *   through — they're created once in createServer() and passed into
- *   createRequestHandler(config, logger, metrics). Don't create new
- *   instances per-request, and don't console.log() directly — use the
- *   `logger` param that's already there.
- *
- * PLANNED FOR LATER PHASES (do not implement yet, just leaving hooks):
- *   Phase 2  -> wire ratelimiter.js into the pipeline (429 responses)
- *   Phase 3  -> wire auth.js (API key / HMAC token check) + tls.js
- *               (https.createServer alongside this http.createServer)
- *   Phase 4  -> replace matchRoute/pickBackend with router.js /
- *               loadbalancer.js, wire in wal.js (durability log)
+ *   Remaining hooks for Phase 2/3 features:
+ *     - Rate limiting (ratelimiter.js) - TODO
+ *     - Authentication (auth.js) - TODO
+ *     - TLS/HTTPS (tls.js) - TODO
  * -----------------------------------------------------------------------
  */
 
@@ -53,49 +31,10 @@ import http from 'node:http';
 import { URL } from 'node:url';
 import { createLogger } from './logger.js';
 import { createMetrics } from './metrics.js';
-
-// -------------------------------------------------------------------------
-// TEMPORARY (Phase 1 only) — replace with `import { matchRoute } from
-// './router.js'` once router.js is implemented.
-//
-// Very small "longest prefix wins" matcher: config.backends is an object
-// like { "/api": [...], "/auth": [...] }. We pick the most specific
-// (longest) route key that the request path starts with.
-// -------------------------------------------------------------------------
-function matchRoute(pathname, config) {
-    const routes = Object.keys(config.backends);
-    let best = null;
-
-    for (const route of routes) {
-        if (pathname === route || pathname.startsWith(route)) {
-            if (best === null || route.length > best.length) {
-                best = route;
-            }
-        }
-    }
-
-    return best; // route key (string) or null if nothing matched
-}
-
-// -------------------------------------------------------------------------
-// TEMPORARY (Phase 1 only) — replace with `import { pickBackend } from
-// './loadbalancer.js'` once loadbalancer.js is implemented (round-robin /
-// least-connections / health-check-aware selection).
-//
-// For now: plain round-robin over whatever backends are listed for the
-// route. No health checks yet — that's Phase 2 (healthcheck.js).
-// -------------------------------------------------------------------------
-const roundRobinCounters = new Map(); // route -> next index
-
-function pickBackend(route, pool) {
-    if (!pool || pool.length === 0) return null;
-
-    const current = roundRobinCounters.get(route) ?? 0;
-    const backend = pool[current % pool.length];
-    roundRobinCounters.set(route, current + 1);
-
-    return backend; // e.g. "http://localhost:4001"
-}
+import { matchRoute } from './router.js';
+import { createLoadBalancer } from './loadbalancer.js';
+import { createHealthChecker } from './healthcheck.js';
+import { createWal } from './wal.js';
 
 // -------------------------------------------------------------------------
 // Forward a single request to a chosen backend and pipe the response back.
@@ -147,13 +86,13 @@ function forwardRequest(clientReq, clientRes, backendBaseUrl) {
 // inline in createServer) so it's easy to unit-test later and easy to
 // extend in Phase 2/3 with rate-limit + auth checks before forwarding.
 //
-// `logger` and `metrics` are created once in createServer() and passed
-// in here (dependency injection) rather than imported as globals, so
-// tests can pass their own instances and nothing leaks state between
-// server instances.
+// `logger`, `metrics`, `loadBalancer`, and `wal` are created once in
+// createServer() and passed in here (dependency injection) rather than
+// imported as globals, so tests can pass their own instances and nothing
+// leaks state between server instances.
 // -------------------------------------------------------------------------
-function createRequestHandler(config, logger, metrics) {
-    return function handleRequest(req, res) {
+function createRequestHandler(config, logger, metrics, loadBalancer, wal) {
+    return async function handleRequest(req, res) {
         const startTime = Date.now();
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -168,9 +107,9 @@ function createRequestHandler(config, logger, metrics) {
 
         // TODO (Phase 2): rate limiter check here -> 429 if exceeded
         // TODO (Phase 3): auth check here -> 401/403 if invalid/missing
-        // TODO (Phase 4): wal.js append-before-forward call here
 
-        const route = matchRoute(parsedUrl.pathname, config);
+        // Match the route using router.js (supports host-based routing)
+        const route = matchRoute(parsedUrl.pathname, config, req.headers.host);
         if (!route) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Not Found', detail: `no backend configured for ${parsedUrl.pathname}` }));
@@ -179,26 +118,78 @@ function createRequestHandler(config, logger, metrics) {
             return;
         }
 
-        const pool = config.backends[route];
-        const backend = pickBackend(route, pool);
+        // Pick a backend using loadbalancer.js (skips unhealthy backends automatically)
+        const backend = loadBalancer.pickBackend(route);
         if (!backend) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Bad Gateway', detail: `no backends available for ${route}` }));
+            res.end(JSON.stringify({ error: 'Bad Gateway', detail: `no healthy backends available for ${route}` }));
             logger.logRequest(req, 502, startTime);
             metrics.recordRequest({ route, backend: null, statusCode: 502, durationMs: Date.now() - startTime });
             return;
         }
 
+        // Append to WAL before forwarding (for durability/audit)
+        let walEntryId = null;
+        if (wal.enabled) {
+            try {
+                walEntryId = await wal.append(req, route, backend);
+                logger.debug(`WAL entry created: ${walEntryId}`);
+            } catch (err) {
+                logger.error(`WAL append failed: ${err.message}`);
+                // Continue even if WAL fails - don't block the request
+            }
+        }
+
+        // Track active connections for least-connections strategy
+        loadBalancer.incrementConnections(route, backend);
+
         // Hook the 'finish' event so we log/record the *actual* status
         // code the client received, once forwarding completes.
         res.on('finish', () => {
+            // Decrement connection count when request completes
+            loadBalancer.decrementConnections(route, backend);
+
+            const durationMs = Date.now() - startTime;
             logger.logRequest(req, res.statusCode, startTime);
             metrics.recordRequest({
                 route,
                 backend,
                 statusCode: res.statusCode,
-                durationMs: Date.now() - startTime,
+                durationMs,
             });
+
+            // Update WAL entry with response information
+            if (walEntryId && wal.enabled) {
+                try {
+                    wal.updateResponse(walEntryId, req, route, backend, {
+                        statusCode: res.statusCode,
+                        headers: res.getHeaders(),
+                    }).catch((err) => {
+                        logger.error(`WAL update failed: ${err.message}`);
+                    });
+                } catch (err) {
+                    logger.error(`WAL update failed: ${err.message}`);
+                }
+            }
+        });
+
+        // Handle errors during response to ensure connection tracking cleanup
+        res.on('error', (err) => {
+            loadBalancer.decrementConnections(route, backend);
+            logger.error(`Response error for ${route} -> ${backend}: ${err.message}`);
+
+            // Log error in WAL if possible
+            if (walEntryId && wal.enabled) {
+                try {
+                    wal.updateResponse(walEntryId, req, route, backend, {
+                        statusCode: 500,
+                        headers: {},
+                        error: err.message,
+                    }).catch(() => { });
+                } catch (_) {
+                    // Ignore WAL errors during error handling
+                }
+            }
         });
 
         forwardRequest(req, res, backend);
@@ -210,23 +201,40 @@ function createRequestHandler(config, logger, metrics) {
  * Returns a plain node:http Server instance so the caller (cli.js) decides
  * when/how to call .listen().
  *
- * Also returns the `logger`/`metrics` instances attached to the server
- * object (server.logger / server.metrics) so cli.js or dashboard.js can
- * reuse the SAME instances rather than creating their own — this matters
- * for dashboard.js in particular, which needs to read the exact counters
- * this server is updating, not a separate empty set.
+ * Also returns the `logger`/`metrics`/`loadBalancer`/`healthChecker`/`wal`
+ * instances attached to the server object so cli.js or dashboard.js can
+ * reuse the SAME instances rather than creating their own.
  */
 export function createServer(config) {
     if (!config || !config.backends) {
         throw new Error('createServer: a valid config with "backends" is required');
     }
 
+    // Create core components
     const logger = createLogger(config);
     const metrics = createMetrics();
 
-    const server = http.createServer(createRequestHandler(config, logger, metrics));
+    // Create health checker and start it
+    const healthChecker = createHealthChecker(config, logger);
+    healthChecker.start();
+
+    // Create load balancer with health checker integration
+    const loadBalancer = createLoadBalancer(config, healthChecker);
+
+    // Create WAL
+    const wal = createWal(config, logger);
+
+    // Create HTTP server with the request handler
+    const server = http.createServer(
+        createRequestHandler(config, logger, metrics, loadBalancer, wal)
+    );
+
+    // Attach instances to server for reuse by other modules
     server.logger = logger;
     server.metrics = metrics;
+    server.loadBalancer = loadBalancer;
+    server.healthChecker = healthChecker;
+    server.wal = wal;
 
     return server;
 }
@@ -244,7 +252,72 @@ export function startServer(config) {
 
     server.listen(port, () => {
         server.logger.info(`Nexus listening on http://localhost:${port}`);
+        server.logger.info(`Load balancing strategy: ${server.loadBalancer.getStrategy()}`);
+        server.logger.info(`Routes configured: ${Object.keys(config.backends).join(', ')}`);
+
+        // Log health checker status
+        const healthyCount = server.healthChecker.getHealthyBackends().length;
+        const totalBackends = server.healthChecker.getStatus().size;
+        server.logger.info(`Health status: ${healthyCount}/${totalBackends} backends healthy`);
+
+        // Log WAL status
+        if (server.wal.enabled) {
+            const walStats = server.wal.getStats();
+            server.logger.info(`WAL enabled: ${config.wal?.path || './wal.log'} (${walStats.entryCount} entries)`);
+        } else {
+            server.logger.info('WAL disabled');
+        }
     });
 
     return server;
+}
+
+/**
+ * Gracefully shutdown the server and all components.
+ * 
+ * @param {http.Server} server - The running server instance
+ * @param {number} [timeout=5000] - Max time to wait for connections to close
+ * @returns {Promise<void>}
+ */
+export function shutdownServer(server, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+        if (!server || !server.listening) {
+            resolve();
+            return;
+        }
+
+        const logger = server.logger || console;
+        logger.info('Shutting down server...');
+
+        // Stop health checker
+        if (server.healthChecker && typeof server.healthChecker.stop === 'function') {
+            server.healthChecker.stop();
+        }
+
+        // Stop WAL (flushes remaining entries)
+        if (server.wal && typeof server.wal.stop === 'function') {
+            server.wal.stop().catch((err) => {
+                logger.error(`WAL stop error: ${err.message}`);
+            });
+        }
+
+        // Set timeout for force shutdown
+        const timeoutId = setTimeout(() => {
+            logger.warn('Force closing connections after timeout');
+            server.close(() => {
+                resolve();
+            });
+        }, timeout);
+
+        // Graceful shutdown
+        server.close((err) => {
+            clearTimeout(timeoutId);
+            if (err) {
+                reject(err);
+            } else {
+                logger.info('Server shutdown complete');
+                resolve();
+            }
+        });
+    });
 }
