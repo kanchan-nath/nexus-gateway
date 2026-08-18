@@ -26,18 +26,33 @@
  *   two functions and import the real ones instead — nothing else in
  *   this file needs to change.
  *
+ * WIRING LOG (who changed what, so nobody overwrites each other)
+ *   [Saikat] Wired in src/logger.js and src/metrics.js in place of the
+ *   old inline logRequest() placeholder:
+ *     - logger.js replaces logRequest() — same call site, same info.
+ *     - metrics.js is mounted at config.metrics.path (GET returns JSON)
+ *       AND records every completed request (route, backend, status,
+ *       duration) via metrics.recordRequest() on the 'finish' event.
+ *   Ashish/Kanchan: if you touch the request pipeline (auth, rate limit,
+ *   WAL), please keep the existing `logger`/`metrics` instances flowing
+ *   through — they're created once in createServer() and passed into
+ *   createRequestHandler(config, logger, metrics). Don't create new
+ *   instances per-request, and don't console.log() directly — use the
+ *   `logger` param that's already there.
+ *
  * PLANNED FOR LATER PHASES (do not implement yet, just leaving hooks):
  *   Phase 2  -> wire ratelimiter.js into the pipeline (429 responses)
  *   Phase 3  -> wire auth.js (API key / HMAC token check) + tls.js
  *               (https.createServer alongside this http.createServer)
  *   Phase 4  -> replace matchRoute/pickBackend with router.js /
- *               loadbalancer.js, wire in wal.js (durability log) and
- *               metrics.js (request counters) via small hook functions
+ *               loadbalancer.js, wire in wal.js (durability log)
  * -----------------------------------------------------------------------
  */
 
 import http from 'node:http';
 import { URL } from 'node:url';
+import { createLogger } from './logger.js';
+import { createMetrics } from './metrics.js';
 
 // -------------------------------------------------------------------------
 // TEMPORARY (Phase 1 only) — replace with `import { matchRoute } from
@@ -131,11 +146,25 @@ function forwardRequest(clientReq, clientRes, backendBaseUrl) {
 // Build the main request handler. Kept as its own function (rather than
 // inline in createServer) so it's easy to unit-test later and easy to
 // extend in Phase 2/3 with rate-limit + auth checks before forwarding.
+//
+// `logger` and `metrics` are created once in createServer() and passed
+// in here (dependency injection) rather than imported as globals, so
+// tests can pass their own instances and nothing leaks state between
+// server instances.
 // -------------------------------------------------------------------------
-function createRequestHandler(config) {
+function createRequestHandler(config, logger, metrics) {
     return function handleRequest(req, res) {
         const startTime = Date.now();
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+        // Metrics route is served directly by Nexus itself — it never
+        // gets proxied to a backend. Must be checked before route
+        // matching so it doesn't need an entry in config.backends.
+        if (config.metrics && config.metrics.path && parsedUrl.pathname === config.metrics.path) {
+            metrics.handleMetricsRoute(req, res);
+            logger.logRequest(req, res.statusCode, startTime);
+            return;
+        }
 
         // TODO (Phase 2): rate limiter check here -> 429 if exceeded
         // TODO (Phase 3): auth check here -> 401/403 if invalid/missing
@@ -145,7 +174,8 @@ function createRequestHandler(config) {
         if (!route) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Not Found', detail: `no backend configured for ${parsedUrl.pathname}` }));
-            logRequest(req, 404, startTime);
+            logger.logRequest(req, 404, startTime);
+            metrics.recordRequest({ route: null, backend: null, statusCode: 404, durationMs: Date.now() - startTime });
             return;
         }
 
@@ -154,41 +184,51 @@ function createRequestHandler(config) {
         if (!backend) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Bad Gateway', detail: `no backends available for ${route}` }));
-            logRequest(req, 502, startTime);
+            logger.logRequest(req, 502, startTime);
+            metrics.recordRequest({ route, backend: null, statusCode: 502, durationMs: Date.now() - startTime });
             return;
         }
 
-        // Hook the 'finish' event so we log the *actual* status code the
-        // client received, once forwarding completes.
-        res.on('finish', () => logRequest(req, res.statusCode, startTime));
+        // Hook the 'finish' event so we log/record the *actual* status
+        // code the client received, once forwarding completes.
+        res.on('finish', () => {
+            logger.logRequest(req, res.statusCode, startTime);
+            metrics.recordRequest({
+                route,
+                backend,
+                statusCode: res.statusCode,
+                durationMs: Date.now() - startTime,
+            });
+        });
 
         forwardRequest(req, res, backend);
-
-        // TODO (Phase 4): metrics.js request counter increment here
     };
-}
-
-// -------------------------------------------------------------------------
-// Minimal inline request logger for Phase 1.
-// Owner note: Saikat's logger.js will replace this in Phase 1/2 — this is
-// just enough to see traffic flowing during early development/testing.
-// -------------------------------------------------------------------------
-function logRequest(req, statusCode, startTime) {
-    const durationMs = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} -> ${statusCode} ${durationMs}ms`);
 }
 
 /**
  * Create (but do not start) the Nexus HTTP server for the given config.
  * Returns a plain node:http Server instance so the caller (cli.js) decides
  * when/how to call .listen().
+ *
+ * Also returns the `logger`/`metrics` instances attached to the server
+ * object (server.logger / server.metrics) so cli.js or dashboard.js can
+ * reuse the SAME instances rather than creating their own — this matters
+ * for dashboard.js in particular, which needs to read the exact counters
+ * this server is updating, not a separate empty set.
  */
 export function createServer(config) {
     if (!config || !config.backends) {
         throw new Error('createServer: a valid config with "backends" is required');
     }
 
-    return http.createServer(createRequestHandler(config));
+    const logger = createLogger(config);
+    const metrics = createMetrics();
+
+    const server = http.createServer(createRequestHandler(config, logger, metrics));
+    server.logger = logger;
+    server.metrics = metrics;
+
+    return server;
 }
 
 /**
@@ -203,7 +243,7 @@ export function startServer(config) {
     const port = config.listen.http;
 
     server.listen(port, () => {
-        console.log(`[server] Nexus listening on http://localhost:${port}`);
+        server.logger.info(`Nexus listening on http://localhost:${port}`);
     });
 
     return server;
