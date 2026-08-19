@@ -105,6 +105,9 @@ export function createLogger(config) {
         error(message) {
             log('error', message);
         },
+        warn(message) {
+            log('info', message);
+        },
 
         /**
          * Request-line logger — the direct replacement for the old

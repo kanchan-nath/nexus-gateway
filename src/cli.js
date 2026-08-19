@@ -168,10 +168,9 @@ function shutdown(servers, logger, exitCode = 0) {
 // Main entrypoint
 // -------------------------------------------------------------------------
 
-function main() {
+async function main() {
     const args = parseArgs(process.argv);
 
-    // Handle --help / --version first (no config needed)
     if (args.help) {
         printHelp();
         process.exit(0);
@@ -182,7 +181,6 @@ function main() {
         process.exit(0);
     }
 
-    // Validate: must have a command and a config path
     if (args.command !== 'start') {
         console.error(`Error: Unknown command "${args.command}"`);
         console.error('Run "node src/cli.js --help" for usage.');
@@ -195,7 +193,6 @@ function main() {
         process.exit(1);
     }
 
-    // Resolve config path relative to current working directory
     const configPath = path.resolve(process.cwd(), args.configPath);
 
     let config;
@@ -206,12 +203,8 @@ function main() {
         process.exit(1);
     }
 
-    // At this point we have a valid config. Start the server(s).
     const servers = [];
 
-    // Create the main HTTP server (always required, even if only
-    // HTTPS is configured? No — if only https is set, we don't start
-    // an HTTP listener. But config validation requires at least one.
     if (config.listen.http != null) {
         try {
             const server = createServer(config);
@@ -221,7 +214,6 @@ function main() {
             });
             servers.push(server);
 
-            // Attach signal handlers after first server starts
             if (servers.length === 1) {
                 const logger = server.logger;
                 process.on('SIGINT', () => shutdown(servers, logger, 0));
@@ -233,31 +225,40 @@ function main() {
         }
     }
 
-    // TODO (Phase 3): HTTPS server via tls.js
-    // Once tls.js is implemented, uncomment this block:
-    //
-    // if (config.listen.https != null) {
-    //   import('./tls.js').then(({ createTLSServer }) => {
-    //     const server = createTLSServer(config, servers[0]?.logger);
-    //     server.listen(config.listen.https, () => {
-    //       server.logger.info(`Nexus listening on https://localhost:${config.listen.https}`);
-    //     });
-    //     servers.push(server);
-    //   });
-    // }
+    if (config.listen.https != null) {
+        try {
+            const { createTLSServer } = await import('./tls.js');
+            const httpServer = servers[0]; // reuse its context (see tls.js note)
+            const httpsServer = createTLSServer(config, httpServer?.logger, httpServer);
+            httpsServer.listen(config.listen.https, () => {
+                httpsServer.logger.info(`Nexus listening on https://localhost:${config.listen.https}`);
+            });
+            servers.push(httpsServer);
 
-    // If no servers were started (shouldn't happen due to config validation)
+            if (servers.length === 1) {
+                const logger = httpsServer.logger;
+                process.on('SIGINT', () => shutdown(servers, logger, 0));
+                process.on('SIGTERM', () => shutdown(servers, logger, 0));
+            }
+        } catch (err) {
+            console.error(`Failed to start HTTPS server: ${err.message}`);
+            process.exit(1);
+        }
+    }
+
     if (servers.length === 0) {
         console.error('No servers configured to listen (need http or https)');
         process.exit(1);
     }
 
-    // Keep process alive (servers do this automatically)
     console.log(`Nexus v${PACKAGE_VERSION} running. Press Ctrl+C to stop.`);
 }
+
+main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});
 
 // -------------------------------------------------------------------------
 // Run the CLI
 // -------------------------------------------------------------------------
-
-main();
