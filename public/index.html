@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nexus — Live Gateway</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #111623;
+    --panel-line: #1e2534;
+    --text: #e4e7eb;
+    --text-dim: #7c8698;
+    --ok: #3ecf8e;
+    --warn: #f5a623;
+    --err: #ff5d5d;
+    --accent: #5b8cff;
+    --mono: 'SFMono-Regular', 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+    --sans: -apple-system, 'Inter', 'Segoe UI', sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(91,140,255,0.06), transparent 45%),
+      radial-gradient(circle at 85% 100%, rgba(62,207,142,0.05), transparent 45%);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--panel-line);
+  }
+
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand-mark {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: 0.5px;
+  }
+  .brand-mark::before { content: '❯ '; color: var(--accent); }
+  .brand-sub { color: var(--text-dim); font-size: 13px; font-family: var(--mono); }
+
+  .conn {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-dim);
+    box-shadow: 0 0 0 0 rgba(0,0,0,0);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .dot.live {
+    background: var(--ok);
+    box-shadow: 0 0 0 4px rgba(62,207,142,0.15);
+    animation: pulse 2s infinite;
+  }
+  .dot.down { background: var(--err); box-shadow: 0 0 0 4px rgba(255,93,93,0.15); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 4px rgba(62,207,142,0.15); }
+    50% { box-shadow: 0 0 0 8px rgba(62,207,142,0.05); }
+  }
+
+  main { padding: 24px 28px 60px; max-width: 1200px; margin: 0 auto; }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+
+  .stat-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-dim); margin-bottom: 8px; font-family: var(--mono);
+  }
+  .stat-value {
+    font-family: var(--mono); font-size: 28px; font-weight: 700; line-height: 1;
+  }
+  .stat-value.ok { color: var(--ok); }
+  .stat-value.warn { color: var(--warn); }
+  .stat-value.err { color: var(--err); }
+  .stat-foot { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+
+  .panel-title {
+    font-family: var(--mono); font-size: 13px; color: var(--text-dim);
+    margin: 26px 0 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  }
+
+  .sparkline-card { padding: 18px; }
+  canvas { display: block; width: 100%; }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--panel-line); }
+  th { color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-family: var(--mono);
+  }
+  .badge.ok { background: rgba(62,207,142,0.12); color: var(--ok); }
+  .badge.err { background: rgba(255,93,93,0.12); color: var(--err); }
+
+  .empty-row td { color: var(--text-dim); text-align: center; padding: 20px; }
+
+  footer {
+    text-align: center; color: var(--text-dim); font-size: 12px;
+    font-family: var(--mono); padding: 30px 0 10px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="brand-mark">NEXUS</span>
+    <span class="brand-sub">reverse proxy · live gateway</span>
+  </div>
+  <div class="conn">
+    <span class="dot" id="connDot"></span>
+    <span id="connLabel">connecting…</span>
+  </div>
+</header>
+
+<main>
+  <div class="stat-grid">
+    <div class="card">
+      <div class="stat-label">Total Requests</div>
+      <div class="stat-value" id="statTotal">0</div>
+      <div class="stat-foot" id="statUptime">uptime —</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Avg Latency</div>
+      <div class="stat-value" id="statLatency">0 ms</div>
+      <div class="stat-foot">rolling window</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Error Rate</div>
+      <div class="stat-value" id="statErrorRate">0%</div>
+      <div class="stat-foot" id="statErrorCount">0 errors</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Backends</div>
+      <div class="stat-value" id="statBackends">0</div>
+      <div class="stat-foot">reporting traffic</div>
+    </div>
+  </div>
+
+  <div class="panel-title">Requests / interval</div>
+  <div class="card sparkline-card">
+    <canvas id="sparkline" height="90"></canvas>
+  </div>
+
+  <div class="panel-title">Backends</div>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>Backend</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Avg Latency</th></tr>
+      </thead>
+      <tbody id="backendRows">
+        <tr class="empty-row"><td colspan="4">waiting for traffic…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel-title">Routes</div>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>Route</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Avg Latency</th></tr>
+      </thead>
+      <tbody id="routeRows">
+        <tr class="empty-row"><td colspan="4">waiting for traffic…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>curl the proxy, watch this update — no socket.io, no Grafana, just SSE.</footer>
+</main>
+
+<script>
+  // Change this if your dashboard SSE route lives somewhere else.
+  const STREAM_PATH = '/nexus/dashboard/stream';
+
+  const connDot = document.getElementById('connDot');
+  const connLabel = document.getElementById('connLabel');
+
+  const statTotal = document.getElementById('statTotal');
+  const statUptime = document.getElementById('statUptime');
+  const statLatency = document.getElementById('statLatency');
+  const statErrorRate = document.getElementById('statErrorRate');
+  const statErrorCount = document.getElementById('statErrorCount');
+  const statBackends = document.getElementById('statBackends');
+  const backendRows = document.getElementById('backendRows');
+  const routeRows = document.getElementById('routeRows');
+
+  // ---- sparkline (plain <canvas>, no chart library) ----------------------
+  const canvas = document.getElementById('sparkline');
+  const ctx = canvas.getContext('2d');
+  const history = [];
+  const MAX_POINTS = 60;
+  let lastTotal = null;
+
+  function resizeCanvas() {
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * ratio;
+    canvas.height = canvas.clientHeight * ratio;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  function drawSparkline() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.clearRect(0, 0, w, h);
+    if (history.length < 2) return;
+
+    const max = Math.max(1, ...history);
+    const stepX = w / (MAX_POINTS - 1);
+    const startIdx = MAX_POINTS - history.length;
+
+    ctx.beginPath();
+    history.forEach((v, i) => {
+      const x = (startIdx + i) * stepX;
+      const y = h - (v / max) * (h - 12) - 4;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#5b8cff';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // fill under the line
+    ctx.lineTo((startIdx + history.length - 1) * stepX, h);
+    ctx.lineTo(startIdx * stepX, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(91,140,255,0.08)';
+    ctx.fill();
+  }
+
+  function pushDelta(total) {
+    if (lastTotal !== null) {
+      const delta = Math.max(0, total - lastTotal);
+      history.push(delta);
+      if (history.length > MAX_POINTS) history.shift();
+    }
+    lastTotal = total;
+    drawSparkline();
+  }
+
+  // ---- formatting helpers -------------------------------------------------
+  function fmtUptime(seconds) {
+    if (seconds == null) return '—';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function shortBackend(url) {
+    try {
+      const u = new URL(url);
+      return u.hostname + (u.port ? ':' + u.port : '');
+    } catch {
+      return url;
+    }
+  }
+
+  function renderTable(tbody, entries, nameFormatter) {
+    if (!entries.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="4">waiting for traffic…</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(([key, bucket]) => `
+      <tr>
+        <td>${nameFormatter(key)}</td>
+        <td class="num">${bucket.requests}</td>
+        <td class="num">${bucket.errors > 0 ? `<span class="badge err">${bucket.errors}</span>` : '<span class="badge ok">0</span>'}</td>
+        <td class="num">${bucket.avgLatencyMs} ms</td>
+      </tr>
+    `).join('');
+  }
+
+  // ---- apply a snapshot to the DOM ----------------------------------------
+  function render(snapshot) {
+    statTotal.textContent = snapshot.totalRequests.toLocaleString();
+    statUptime.textContent = `uptime ${fmtUptime(snapshot.uptimeSeconds)}`;
+    statLatency.textContent = `${snapshot.avgLatencyMs} ms`;
+
+    const errorPct = (snapshot.errorRate * 100).toFixed(1);
+    statErrorRate.textContent = `${errorPct}%`;
+    statErrorRate.className = 'stat-value ' + (snapshot.errorRate > 0.1 ? 'err' : snapshot.errorRate > 0 ? 'warn' : 'ok');
+    statErrorCount.textContent = `${snapshot.errorCount} errors`;
+
+    const backendEntries = Object.entries(snapshot.perBackend || {});
+    statBackends.textContent = backendEntries.length;
+    renderTable(backendRows, backendEntries, shortBackend);
+
+    const routeEntries = Object.entries(snapshot.perRoute || {});
+    renderTable(routeRows, routeEntries, (r) => r);
+
+    pushDelta(snapshot.totalRequests);
+  }
+
+  // ---- SSE connection -------------------------------------------------------
+  function connect() {
+    const source = new EventSource(STREAM_PATH);
+
+    source.onopen = () => {
+      connDot.className = 'dot live';
+      connLabel.textContent = 'live';
+    };
+
+    source.onmessage = (event) => {
+      try {
+        render(JSON.parse(event.data));
+      } catch (err) {
+        console.error('bad snapshot payload', err);
+      }
+    };
+
+    source.onerror = () => {
+      connDot.className = 'dot down';
+      connLabel.textContent = 'reconnecting…';
+      // EventSource retries automatically; nothing else to do here.
+    };
+  }
+
+  connect();
+</script>
+
+</body>
+</html>
