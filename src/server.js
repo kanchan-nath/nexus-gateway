@@ -43,7 +43,9 @@ import { createHealthChecker } from './healthcheck.js';
 import { createWal } from './wal.js';
 import { createRateLimiter, getClientIp } from './ratelimiter.js';
 import { authenticate } from './auth.js';
-
+import { createDashboard } from './dashboard.js';
+import fs from 'node:fs';
+import path from 'node:path';
 // -------------------------------------------------------------------------
 // Forward a single request to a chosen backend and pipe the response back.
 // This is the actual "reverse proxy" mechanic: we open our own outbound
@@ -98,24 +100,41 @@ function forwardRequest(clientReq, clientRes, backendBaseUrl) {
 // injection) rather than imported as globals, so tests can pass their own
 // instances and nothing leaks state between server instances.
 // -------------------------------------------------------------------------
-function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter) {
+function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter, dashboard) {
     return async function handleRequest(req, res) {
         const startTime = Date.now();
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-        // Metrics route is served directly by Nexus itself — it never
-        // gets proxied to a backend. Must be checked before route
-        // matching so it doesn't need an entry in config.backends.
         if (config.metrics && config.metrics.path && parsedUrl.pathname === config.metrics.path) {
             metrics.handleMetricsRoute(req, res);
             logger.logRequest(req, res.statusCode, startTime);
             return;
         }
 
+        // ---- Static dashboard UI (public/index.html) -------------------
+        // Served directly by Nexus at "/" — the page's own JS connects
+        // to config.dashboard.path (the SSE stream) client-side.
+        if (parsedUrl.pathname === '/' || parsedUrl.pathname === '/nexus/dashboard') {
+            try {
+                const html = fs.readFileSync(path.resolve('./public/index.html'));
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end(html);
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Internal Server Error', detail: 'dashboard UI not found' }));
+                logger.error(`Failed to serve dashboard UI: ${err.message}`);
+            }
+            logger.logRequest(req, res.statusCode, startTime);
+            return;
+        }
+
+        // ---- Dashboard SSE stream (dashboard.js) -----------------------
+        // Served directly by Nexus, same as /nexus/metrics — never proxied.
+        if (config.dashboard?.path && parsedUrl.pathname === config.dashboard.path) {
+            return dashboard.handleDashboardStream(req, res);
+        }
+
         // ---- Rate limit check (ratelimiter.js) -----------------------
-        // Runs BEFORE auth on purpose: it's a cheap Map lookup, so it's
-        // the first line of defense against spam/DoS traffic before we
-        // spend CPU on HMAC signature verification in authenticate().
         const clientIp = getClientIp(req);
         const rateLimitResult = rateLimiter.checkLimit(clientIp);
         if (!rateLimitResult.allowed) {
@@ -130,9 +149,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
             return;
         }
 
-        // ---- Auth check (auth.js) -------------------------------------
-        // No-op (always authenticated) when config.auth.required is
-        // false, so this is safe to leave enabled unconditionally.
         const authResult = authenticate(req, config);
         if (!authResult.authenticated) {
             res.writeHead(401, {
@@ -145,7 +161,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
             return;
         }
 
-        // Match the route using router.js (supports host-based routing)
         const route = matchRoute(parsedUrl.pathname, config, req.headers.host);
         if (!route) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -155,7 +170,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
             return;
         }
 
-        // Pick a backend using loadbalancer.js (skips unhealthy backends automatically)
         const backend = loadBalancer.pickBackend(route);
         if (!backend) {
             res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -165,7 +179,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
             return;
         }
 
-        // Append to WAL before forwarding (for durability/audit)
         let walEntryId = null;
         if (wal.enabled) {
             try {
@@ -173,17 +186,12 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
                 logger.debug(`WAL entry created: ${walEntryId}`);
             } catch (err) {
                 logger.error(`WAL append failed: ${err.message}`);
-                // Continue even if WAL fails - don't block the request
             }
         }
 
-        // Track active connections for least-connections strategy
         loadBalancer.incrementConnections(route, backend);
 
-        // Hook the 'finish' event so we log/record the *actual* status
-        // code the client received, once forwarding completes.
         res.on('finish', () => {
-            // Decrement connection count when request completes
             loadBalancer.decrementConnections(route, backend);
 
             const durationMs = Date.now() - startTime;
@@ -195,7 +203,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
                 durationMs,
             });
 
-            // Update WAL entry with response information
             if (walEntryId && wal.enabled) {
                 try {
                     wal.updateResponse(walEntryId, req, route, backend, {
@@ -210,12 +217,10 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
             }
         });
 
-        // Handle errors during response to ensure connection tracking cleanup
         res.on('error', (err) => {
             loadBalancer.decrementConnections(route, backend);
             logger.error(`Response error for ${route} -> ${backend}: ${err.message}`);
 
-            // Log error in WAL if possible
             if (walEntryId && wal.enabled) {
                 try {
                     wal.updateResponse(walEntryId, req, route, backend, {
@@ -224,7 +229,6 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLi
                         error: err.message,
                     }).catch(() => { });
                 } catch (_) {
-                    // Ignore WAL errors during error handling
                 }
             }
         });
@@ -260,7 +264,7 @@ export function createRequestContext(config) {
     // Create core components
     const logger = createLogger(config);
     const metrics = createMetrics();
-
+    const dashboard = createDashboard(config, metrics);
     // Create health checker and start it
     const healthChecker = createHealthChecker(config, logger);
     healthChecker.start();
@@ -274,9 +278,9 @@ export function createRequestContext(config) {
     // Create rate limiter (one bucket-map per process/context, not per request)
     const rateLimiter = createRateLimiter(config);
 
-    const requestHandler = createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter);
+    const requestHandler = createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter, dashboard);
 
-    return { requestHandler, logger, metrics, loadBalancer, healthChecker, wal, rateLimiter };
+    return { requestHandler, logger, metrics, loadBalancer, healthChecker, wal, rateLimiter, dashboard };
 }
 
 /**
