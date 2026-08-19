@@ -53,10 +53,20 @@ per-module list — the short version:
 - Test suite for the above (`node --test`) — 42 passing, 19 skipped
   placeholders for not-yet-built modules, 0 failing
 
-**Not yet implemented (empty stub files, per the phased plan):**
-`router.js`, `loadbalancer.js`, `healthcheck.js`, `ratelimiter.js`,
-`auth.js`, `wal.js`, `tls.js`, `dashboard.js`, `cli.js`,
-`examples/backend-echo.js`, `public/index.html`
+- `src/dashboard.js` — SSE endpoint pushing `metrics.getSnapshot()`
+  every `pushIntervalMs` (Biyas)
+- `public/index.html` — live dashboard UI, plain HTML/CSS/vanilla JS,
+  no framework (Biyas)
+- `examples/backend-echo.js` — dummy backend for demo/dev, echoes
+  requests, plus `/health` and `?slow=1` for demoing health checks and
+  load balancing visibly (Biyas)
+
+**Still not yet implemented:** `tls.js`
+
+**Integration note:** `dashboard.js` needs one small wire-up in
+`server.js` (mounting `config.dashboard.path` the same way
+`config.metrics.path` is already mounted) — see the header comment in
+`dashboard.js` for the exact diff.
 
 ---
 
@@ -159,7 +169,7 @@ These are handled directly by Nexus (not proxied to a backend):
 | Path | Method | Description | Status |
 |---|---|---|---|
 | `config.metrics.path` (default `/nexus/metrics`) | GET | Live JSON snapshot: total requests, error rate, rolling-window average latency, per-backend and per-route breakdown | Implemented |
-| `config.dashboard.path` (default `/nexus/dashboard/stream`) | GET | Server-Sent Events stream pushing a metrics snapshot every `pushIntervalMs` | Not yet implemented (Biyas) |
+| `config.dashboard.path` (default `/nexus/dashboard/stream`) | GET | Server-Sent Events stream pushing a metrics snapshot every `pushIntervalMs` | Implemented (Biyas) — needs the one-line mount in `server.js` |
 
 Example `/nexus/metrics` response shape:
 
@@ -184,6 +194,45 @@ Example `/nexus/metrics` response shape:
 
 ---
 
+## Running the full demo locally
+
+Once `server.js` mounts `dashboard.js` (see integration note above),
+this is the full loop to demo Nexus end-to-end:
+
+```bash
+# 1. Start two dummy backends (separate terminals)
+node examples/backend-echo.js --port 4001 --name backend-A
+node examples/backend-echo.js --port 4002 --name backend-B
+
+# 2. Start Nexus
+node --input-type=module -e "
+import { loadConfig } from './src/config.js';
+import { startServer } from './src/server.js';
+const config = loadConfig('./nexus.config.json');
+startServer(config);
+"
+
+# 3. Open the dashboard
+# Serve public/index.html any way you like, e.g.:
+npx --yes serve public
+# then open http://localhost:3000 in a browser — it connects to
+# http://localhost:8080/nexus/dashboard/stream automatically.
+
+# 4. Generate traffic
+curl -H "X-API-Key: demo-key-123" http://localhost:8080/api/hello
+
+# 5. Demo load balancing + health checks
+curl -H "X-API-Key: demo-key-123" "http://localhost:4001/health?fail=1"
+# watch the dashboard's Backends table mark backend-A unhealthy and
+# traffic shift entirely to backend-B
+
+# 6. Demo rate limiting
+for i in $(seq 1 30); do curl -H "X-API-Key: demo-key-123" http://localhost:8080/api/hello; done
+# after `rateLimit.max` requests in the window, expect 429s
+```
+
+---
+
 ## Project structure
 
 ``` txt
@@ -201,9 +250,9 @@ nexus/
 │ ├── wal.js → Kanchan [done]
 │ ├── metrics.js → Saikat [done]
 │ ├── logger.js → Saikat [done]
-│ └── dashboard.js → Biyas [not yet implemented]
+│ └── dashboard.js → Biyas [done]
 ├── public/
-│ └── index.html → Biyas [not yet implemented]
+│ └── index.html → Biyas [done]
 ├── test/
 │ ├── config.test.js → Kanchan [done]
 │ ├── logger.test.js → Saikat [done]
@@ -213,7 +262,7 @@ nexus/
 │ ├── ratelimiter.test.js → Saikat [placeholder scaffold]
 │ └── auth.test.js → Biyas [placeholder scaffold]
 ├── examples/
-│ └── backend-echo.js → Biyas [not yet implemented]
+│ └── backend-echo.js → Biyas [done]
 ├── README.md → Biyas + Saikat [this file]
 ├── STDLIB.md → Saikat [done]
 ├── nexus.config.json → Kanchan [done]
