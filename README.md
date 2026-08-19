@@ -4,9 +4,11 @@ A zero-dependency reverse proxy / API gateway built entirely on Node.js
 built-in modules — no Express, no npm packages of any kind. Built in 72
 hours for **Hackathon Raptors — Track C: Web & Network**.
 
-**Co-owners:** Biyas, Saikat
-**Status of this document:** skeleton drafted by Saikat — sections
-marked `[PLACEHOLDER - Biyas]` still need screenshots/video/demo content
+### **Co-owners:** `Biyas`, `Saikat`
+
+### **Status of this document:** 
+Skeleton drafted by `Saikat` — sections
+marked as `Biyas` still need screenshots/video/demo content
 before submission. Everything else reflects the actual state of the
 repo as of this commit.
 
