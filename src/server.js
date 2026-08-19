@@ -19,11 +19,17 @@
  *     - logger.js for structured logging
  *     - metrics.js for request metrics
  *     - wal.js for write-ahead logging (durability)
+ *     - ratelimiter.js for per-IP rate limiting  <-- newly wired in
+ *     - auth.js for API key / HMAC token auth    <-- newly wired in
  *
- *   Remaining hooks for Phase 2/3 features:
- *     - Rate limiting (ratelimiter.js) - TODO
- *     - Authentication (auth.js) - TODO
- *     - TLS/HTTPS (tls.js) - TODO
+ *   Remaining hook: TLS/HTTPS (tls.js). This file now exposes
+ *   `createRequestContext()` (construction only, no listener started)
+ *   specifically so tls.js can reuse the EXACT SAME request pipeline —
+ *   same loadBalancer, healthChecker, wal, metrics, and rateLimiter
+ *   instances — instead of spinning up a second, independent set of
+ *   background workers (duplicate health-check polling, a second WAL
+ *   writer racing on the same file, etc). See createServer() below and
+ *   the notes in tls.js for how this gets threaded through cli.js.
  * -----------------------------------------------------------------------
  */
 
@@ -35,6 +41,8 @@ import { matchRoute } from './router.js';
 import { createLoadBalancer } from './loadbalancer.js';
 import { createHealthChecker } from './healthcheck.js';
 import { createWal } from './wal.js';
+import { createRateLimiter, getClientIp } from './ratelimiter.js';
+import { authenticate } from './auth.js';
 
 // -------------------------------------------------------------------------
 // Forward a single request to a chosen backend and pipe the response back.
@@ -83,15 +91,14 @@ function forwardRequest(clientReq, clientRes, backendBaseUrl) {
 
 // -------------------------------------------------------------------------
 // Build the main request handler. Kept as its own function (rather than
-// inline in createServer) so it's easy to unit-test later and easy to
-// extend in Phase 2/3 with rate-limit + auth checks before forwarding.
+// inline in createServer) so it's easy to unit-test later.
 //
-// `logger`, `metrics`, `loadBalancer`, and `wal` are created once in
-// createServer() and passed in here (dependency injection) rather than
-// imported as globals, so tests can pass their own instances and nothing
-// leaks state between server instances.
+// `logger`, `metrics`, `loadBalancer`, `wal`, and `rateLimiter` are all
+// created once in createRequestContext() and passed in here (dependency
+// injection) rather than imported as globals, so tests can pass their own
+// instances and nothing leaks state between server instances.
 // -------------------------------------------------------------------------
-function createRequestHandler(config, logger, metrics, loadBalancer, wal) {
+function createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter) {
     return async function handleRequest(req, res) {
         const startTime = Date.now();
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -105,8 +112,38 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal) {
             return;
         }
 
-        // TODO (Phase 2): rate limiter check here -> 429 if exceeded
-        // TODO (Phase 3): auth check here -> 401/403 if invalid/missing
+        // ---- Rate limit check (ratelimiter.js) -----------------------
+        // Runs BEFORE auth on purpose: it's a cheap Map lookup, so it's
+        // the first line of defense against spam/DoS traffic before we
+        // spend CPU on HMAC signature verification in authenticate().
+        const clientIp = getClientIp(req);
+        const rateLimitResult = rateLimiter.checkLimit(clientIp);
+        if (!rateLimitResult.allowed) {
+            const retryAfterSeconds = Math.ceil(rateLimitResult.retryAfterMs / 1000);
+            res.writeHead(429, {
+                'Content-Type': 'application/json',
+                'Retry-After': String(retryAfterSeconds),
+            });
+            res.end(JSON.stringify({ error: 'Too Many Requests', detail: `retry after ${retryAfterSeconds}s` }));
+            logger.logRequest(req, 429, startTime);
+            metrics.recordRequest({ route: null, backend: null, statusCode: 429, durationMs: Date.now() - startTime });
+            return;
+        }
+
+        // ---- Auth check (auth.js) -------------------------------------
+        // No-op (always authenticated) when config.auth.required is
+        // false, so this is safe to leave enabled unconditionally.
+        const authResult = authenticate(req, config);
+        if (!authResult.authenticated) {
+            res.writeHead(401, {
+                'Content-Type': 'application/json',
+                'WWW-Authenticate': 'ApiKey, Bearer',
+            });
+            res.end(JSON.stringify({ error: 'Unauthorized', detail: authResult.reason }));
+            logger.logRequest(req, 401, startTime);
+            metrics.recordRequest({ route: null, backend: null, statusCode: 401, durationMs: Date.now() - startTime });
+            return;
+        }
 
         // Match the route using router.js (supports host-based routing)
         const route = matchRoute(parsedUrl.pathname, config, req.headers.host);
@@ -197,17 +234,27 @@ function createRequestHandler(config, logger, metrics, loadBalancer, wal) {
 }
 
 /**
- * Create (but do not start) the Nexus HTTP server for the given config.
- * Returns a plain node:http Server instance so the caller (cli.js) decides
- * when/how to call .listen().
+ * Build the full set of shared components (logger, metrics, load balancer,
+ * health checker, WAL, rate limiter) plus the resulting request-handler
+ * function — WITHOUT creating an http.Server or starting anything that
+ * listens on a socket. This is deliberately separated from createServer()
+ * so tls.js can build (or reuse) the exact same pipeline for HTTPS
+ * without duplicating background workers.
  *
- * Also returns the `logger`/`metrics`/`loadBalancer`/`healthChecker`/`wal`
- * instances attached to the server object so cli.js or dashboard.js can
- * reuse the SAME instances rather than creating their own.
+ * NOTE: healthChecker.start() IS called here (it has to run regardless of
+ * which protocol requests arrive on) — so whichever caller builds a
+ * context first "owns" the health-check polling and WAL file handle for
+ * that process. If both HTTP and HTTPS are enabled, cli.js should build
+ * ONE context and reuse it for both listeners (see tls.js for the exact
+ * hook), not call this twice.
+ *
+ * @param {object} config
+ * @returns {{ requestHandler: Function, logger: object, metrics: object,
+ *   loadBalancer: object, healthChecker: object, wal: object, rateLimiter: object }}
  */
-export function createServer(config) {
+export function createRequestContext(config) {
     if (!config || !config.backends) {
-        throw new Error('createServer: a valid config with "backends" is required');
+        throw new Error('createRequestContext: a valid config with "backends" is required');
     }
 
     // Create core components
@@ -224,17 +271,43 @@ export function createServer(config) {
     // Create WAL
     const wal = createWal(config, logger);
 
-    // Create HTTP server with the request handler
-    const server = http.createServer(
-        createRequestHandler(config, logger, metrics, loadBalancer, wal)
-    );
+    // Create rate limiter (one bucket-map per process/context, not per request)
+    const rateLimiter = createRateLimiter(config);
+
+    const requestHandler = createRequestHandler(config, logger, metrics, loadBalancer, wal, rateLimiter);
+
+    return { requestHandler, logger, metrics, loadBalancer, healthChecker, wal, rateLimiter };
+}
+
+/**
+ * Create (but do not start) the Nexus HTTP server for the given config.
+ * Returns a plain node:http Server instance so the caller (cli.js) decides
+ * when/how to call .listen().
+ *
+ * Also returns the `logger`/`metrics`/`loadBalancer`/`healthChecker`/`wal`/
+ * `rateLimiter`/`requestHandler` instances attached to the server object
+ * so cli.js, tls.js, or dashboard.js can reuse the SAME instances rather
+ * than creating their own. `requestHandler` in particular is what tls.js
+ * needs to stand up an HTTPS listener that shares this exact pipeline —
+ * see FUTURE INTEGRATION note in tls.js.
+ *
+ * @param {object} config
+ * @param {object} [existingContext] - reuse a context built elsewhere
+ *   (e.g. by tls.js) instead of constructing a new one. Optional.
+ */
+export function createServer(config, existingContext = null) {
+    const ctx = existingContext || createRequestContext(config);
+
+    const server = http.createServer(ctx.requestHandler);
 
     // Attach instances to server for reuse by other modules
-    server.logger = logger;
-    server.metrics = metrics;
-    server.loadBalancer = loadBalancer;
-    server.healthChecker = healthChecker;
-    server.wal = wal;
+    server.logger = ctx.logger;
+    server.metrics = ctx.metrics;
+    server.loadBalancer = ctx.loadBalancer;
+    server.healthChecker = ctx.healthChecker;
+    server.wal = ctx.wal;
+    server.rateLimiter = ctx.rateLimiter;
+    server.requestHandler = ctx.requestHandler;
 
     return server;
 }
