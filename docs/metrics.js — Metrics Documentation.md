@@ -2,139 +2,123 @@
 
 ## Purpose
 
-`metrics.js` Nexus ka **in-memory metrics collector** hai.
+`metrics.js` is Nexus's **in-memory metrics collector**.
 
-Ye application ke runtime performance statistics track karta hai, jaise:
+It tracks runtime statistics such as:
 
-- Total requests
-- Error count
-- Error rate
-- Average latency
-- Per-backend request statistics
-- Per-route request statistics
+* Total requests
+* Error count
+* Error rate
+* Average latency
+* Per-backend request statistics
+* Per-route request statistics
 
-Ye kisi external metrics library, jaise `prom-client`, ko use nahi karta. Simple JavaScript objects, `Map`, arrays aur `reduce()` se metrics maintain karta hai.
+It uses only native JavaScript structures such as `Map`, arrays, and `reduce()`, avoiding external metrics libraries.
 
 ## Context
 
-`server.js` har completed request ke baad metrics record karta hai. Ye same metrics:
+`server.js` records metrics after a request has completed. The collected data can then be consumed by the metrics endpoint or the live dashboard.
 
-- `/nexus/metrics` endpoint se JSON ke form me expose hote hain.
-- `dashboard.js` ko live dashboard ke liye provide kiye jaate hain.
-
-```text id="q7j9ew"
-Request
-   ↓
+```text id="4w6v1k"
+Completed Request
+       ↓
 server.js
-   ↓
+       ↓
 recordRequest()
-   ↓
+       ↓
 metrics.js
-   ↓
+       ↓
 getSnapshot()
-   ├── /nexus/metrics
-   └── dashboard.js (SSE)
+    ↙       ↘
+Metrics    Dashboard
+Endpoint     (SSE)
 ```
 
-## What Counts as an Error?
+Each call to `createMetrics()` creates an independent metrics instance rather than using a global singleton.
 
-Agar response status code:
+## Error Tracking
 
-```text id="5wy2xq"
->= 400
+A response is considered an error when:
+
+```text id="h1r4q8"
+statusCode >= 400
 ```
 
-hai, to request ko error maana jata hai.
+This includes both client errors and server/gateway errors.
 
-Isme dono include hain:
+Examples:
 
-- `4xx` → client/gateway errors
-- `5xx` → backend/server errors
-
-Example:
-
-```text id="2h9n5g"
-404 → Error
+```text id="y8f3mc"
 401 → Error
+404 → Error
 429 → Error
 502 → Error
 503 → Error
 ```
 
-## Metrics Tracked
+The threshold is defined by `ERROR_STATUS_THRESHOLD`.
 
-### Total Requests
+## Latency Tracking
 
-`totalRequests` application ko receive hue completed requests ki total count rakhta hai.
+The top-level `avgLatencyMs` uses a **rolling window**.
 
-### Error Count
+The default window contains the last:
 
-`errorCount` un requests ki count rakhta hai jinka status code `400` ya higher hai.
-
-### Error Rate
-
-```text id="8lpk0g"
-errorRate = errorCount / totalRequests
-```
-
-Agar koi request nahi hui hai, error rate `0` hota hai.
-
-### Average Latency
-
-Top-level `avgLatencyMs` **rolling-window average** hai.
-
-Default window:
-
-```text id="x3dfw7"
+```text id="x6m2qa"
 100 requests
 ```
 
-Matlab dashboard current/recent performance ko reflect karta hai, instead of poore application lifetime ka average.
+When the window is full, new durations replace the oldest values.
 
-## Rolling Window
+This keeps the dashboard focused on recent application performance rather than the average across the entire runtime.
 
-Recent request durations ek array me store hote hain.
+Per-backend and per-route latency use all recorded requests for that backend or route.
 
-Jab 100 samples complete ho jaate hain, purane values overwrite hone lagte hain.
+## Main Metrics
 
-```text id="f5d6me"
-Request 1
-Request 2
-...
-Request 100
-       ↓
-Request 101 replaces oldest sample
+### `totalRequests`
+
+Total number of completed requests recorded by the metrics collector.
+
+### `errorCount`
+
+Number of recorded requests with a status code of `400` or higher.
+
+### `errorRate`
+
+Calculated as:
+
+```text id="u4v9dz"
+errorCount / totalRequests
 ```
 
-Isliye memory usage controlled rehti hai aur average current performance ke closer rehta hai.
+Returns `0` when no requests have been recorded.
+
+### `avgLatencyMs`
+
+Average latency of the requests currently stored in the rolling window.
 
 ## Per-Backend Metrics
 
-Har backend ke liye separate bucket maintain hota hai.
+The collector maintains a separate bucket for each backend.
 
-Example:
+Each bucket contains:
 
-```text id="e6b6wt"
-Backend A
-  requests
-  errors
-  avgLatencyMs
-
-Backend B
-  requests
-  errors
-  avgLatencyMs
+```text id="m3s7pk"
+requests
+errors
+avgLatencyMs
 ```
 
-Backend-level latency **all-time average** hoti hai.
+This makes it possible to compare backend performance and error rates.
 
 ## Per-Route Metrics
 
-Har route ke liye bhi separate statistics maintain hote hain.
+The same type of bucket is maintained for each configured route.
 
 Example:
 
-```text id="l8k9py"
+```text id="r9c5hx"
 /api
   requests
   errors
@@ -146,84 +130,48 @@ Example:
   avgLatencyMs
 ```
 
-Ye bhi all-time average use karta hai.
-
 ## Main Functions
 
 ### `createMetrics(options)`
 
-Ek independent metrics instance create karta hai.
+Creates an independent metrics collector.
 
-Optional:
+The rolling-window size can optionally be customized through:
 
-```text id="w4w7i9"
+```text id="n7w2ke"
 rollingWindowSize
 ```
 
-se rolling latency window ka size change kiya ja sakta hai.
-
-Har instance ka apna state hota hai, isliye testing ke liye fresh metrics object easily create kiya ja sakta hai.
-
 ### `recordRequest()`
 
-Completed request ke metrics update karta hai.
+Records one completed request.
 
-Input me mainly:
+It updates:
 
-- `route`
-- `backend`
-- `statusCode`
-- `durationMs`
+* Total request count
+* Error count
+* Rolling latency data
+* Backend statistics
+* Route statistics
 
-milte hain.
+It accepts:
 
-Ye update karta hai:
-
-```text id="6p8k6x"
-totalRequests
-errorCount
-latency window
-perBackend
-perRoute
+```text id="p8x4mv"
+route
+backend
+statusCode
+durationMs
 ```
 
 ### `getSnapshot()`
 
-Current metrics ko ek **plain JavaScript object** me return karta hai.
+Returns all current metrics as a plain JavaScript object.
 
-Snapshot directly:
+The result can be directly passed to `JSON.stringify()`.
 
-```text id="j5z1fh"
-JSON.stringify(snapshot)
-```
+It includes:
 
-ke through JSON me convert kiya ja sakta hai.
-
-Isliye ye dashboard aur HTTP metrics endpoint dono ke liye useful hai.
-
-### `handleMetricsRoute()`
-
-Metrics ko HTTP JSON response ke form me expose karta hai.
-
-Example:
-
-```text id="4m5j2p"
-GET /nexus/metrics
-       ↓
-JSON metrics response
-```
-
-### `reset()`
-
-Saare counters aur stored data clear karta hai.
-
-Mainly testing ke liye useful hai.
-
-## Snapshot Structure
-
-Snapshot roughly ye information provide karta hai:
-
-```text id="g2a5u7"
+```text id="b6q1sy"
 startedAt
 uptimeSeconds
 totalRequests
@@ -236,48 +184,62 @@ perBackend
 perRoute
 ```
 
+### `handleMetricsRoute()`
+
+Provides an HTTP handler that returns the current metrics as JSON.
+
+This can be mounted at the configured metrics path, such as:
+
+```text id="k2d8rn"
+/nexus/metrics
+```
+
+### `reset()`
+
+Clears all counters, latency samples, route buckets, and backend buckets.
+
+It is mainly useful for testing.
+
 ## Integration
 
 ### `server.js`
 
-`server.js` ek metrics instance create karta hai aur request complete hone par `recordRequest()` call karta hai.
+`server.js` creates one metrics instance and calls `recordRequest()` after each response finishes.
 
 ### `dashboard.js`
 
-Dashboard ko metrics directly calculate nahi karne chahiye.
+The dashboard should use:
 
-Instead:
-
-```text id="k8x3v4"
+```text id="v5m9qt"
 metrics.getSnapshot()
 ```
 
-call karke snapshot SSE ke through browser ko push karna chahiye.
+rather than maintaining its own counters.
+
+The snapshot can then be sent to the browser through Server-Sent Events (SSE).
 
 ### Other Modules
 
-Future me `ratelimiter.js` ya `auth.js` additional events record karna chahein to same metrics instance dependency injection ke through pass kiya ja sakta hai.
+Other modules can use the same metrics instance if additional events need to be recorded.
 
-Global singleton intentionally avoid kiya gaya hai.
+The design intentionally avoids a hidden global metrics singleton and instead relies on dependency injection.
 
 ## Overall Summary
 
-`metrics.js` Nexus ka **runtime monitoring/data collection layer** hai.
+`metrics.js` is Nexus's **runtime monitoring layer**.
 
-Simple flow:
+Its basic flow is:
 
-```text id="s7n1ce"
-Completed Request
-      ↓
+```text id="s3f7qa"
+Request Completed
+       ↓
 recordRequest()
-      ↓
-Update Counters
-      ↓
-Calculate Metrics
-      ↓
+       ↓
+Update Metrics
+       ↓
 getSnapshot()
-      ├── HTTP JSON endpoint
-      └── Live Dashboard
+    ↙       ↘
+HTTP API   Dashboard
 ```
 
-Overall, ye file Nexus ke requests, errors aur latency ko lightweight aur zero-dependency way me track karti hai, while keeping the metrics logic separate from `server.js`.
+It provides lightweight request, error, route, backend, and latency metrics without requiring an external monitoring library.
