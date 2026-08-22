@@ -2,163 +2,163 @@
 
 ## Purpose
 
-`logger.js` Nexus ka **centralized structured logger** hai.
+`logger.js` provides a centralized, zero-dependency logging system for Nexus.
 
-Ye `server.js` ke old inline `logRequest()` logic ko replace karta hai aur bina kisi external logging library ke:
+It replaces the temporary inline logging logic in `server.js` and provides consistent logging through:
 
-- `debug`
-- `info`
-- `error`
-- `warn`
+* `debug`
+* `info`
+* `error`
+* `warn`
 
-messages handle karta hai.
-
-Isme sirf JavaScript ka built-in `console` aur `Date` use hota hai.
+It uses only Node.js built-in `console` and `Date` functionality, avoiding external logging libraries such as Winston or Pino.
 
 ## Context
 
-Nexus me logging ko alag module me rakhne ka purpose hai ki har component same log format aur log-level rules follow kare.
+Instead of implementing logging separately inside different modules, Nexus uses this module as a common logging layer.
 
-```text
-server.js / other modules
-          ↓
-     logger.js
-          ↓
-     console output
+```text id="w2l6a0"
+Nexus Modules
+     ↓
+ createLogger()
+     ↓
+ logger.debug()
+ logger.info()
+ logger.error()
+     ↓
+ Console Output
 ```
 
-Isse different files me manually `console.log()` likhne ki zarurat nahi padti.
+This keeps log formatting and log-level behavior consistent throughout the application.
 
 ## Log Levels
 
-Logger 3 levels support karta hai:
+The logger supports three configured levels:
 
-```text
+```text id="j3f9cs"
 debug < info < error
 ```
 
-Configured level ke according output filter hota hai.
+The configured level determines which messages are displayed.
 
-| Config Level | Output |
-|---|---|
-| `debug` | debug + info + error |
-| `info` | info + error |
-| `error` | error only |
+| Configured Level | Output                 |
+| ---------------- | ---------------------- |
+| `debug`          | Debug, info, and error |
+| `info`           | Info and error         |
+| `error`          | Error only             |
 
-Agar configuration missing ya invalid ho, default level `info` use hota hai.
+If the configured level is missing or invalid, the logger defaults to `info`.
 
 ## Log Format
 
-Har log line ka format:
+Each log message follows a consistent format:
 
-```text
-[2026-08-17T10:00:00.000Z] INFO  message text here
+```text id="4x8q5d"
+[2026-08-17T10:00:00.000Z] INFO  Server started
 ```
 
-Isme:
+It contains:
 
-- Timestamp → `Date().toISOString()`
-- Level → uppercase aur aligned
-- Message → actual log information
+* ISO timestamp
+* Uppercase log level
+* Log message
 
-`error` messages `console.error()` ke through stderr par jaate hain, jabki baaki messages `console.log()` use karte hain.
+Error messages use `console.error()`, while other messages use `console.log()`.
 
 ## Main Functions
 
 ### `createLogger(config)`
 
-Configuration ke `logging.level` ke according logger instance create karta hai.
+Creates a logger using the configured `logging.level`.
 
-Example:
-
-```text
-createLogger(config)
-       ↓
-configured level
-       ↓
-debug / info / error filtering
-```
+It safely falls back to `info` when the configuration is missing or invalid.
 
 ### `debug(message)`
 
-Debug-level message print karta hai.
+Logs a debug-level message.
+
+It is shown only when the configured level is `debug`.
 
 ### `info(message)`
 
-Normal informational message print karta hai.
+Logs a normal informational message.
 
 ### `error(message)`
 
-Error-level message print karta hai.
+Logs an error-level message.
+
+Errors are always displayed when the configured level is `debug`, `info`, or `error`.
 
 ### `warn(message)`
 
-Warning ko currently `info` level ke equivalent treat karta hai.
+Provides a warning-style API but currently uses the `info` log level internally.
 
 ### `logRequest(req, statusCode, startTime)`
 
-HTTP request ka summary log karta hai.
+Logs information about a completed HTTP request.
 
 Example:
 
-```text
-GET /api -> 200 15ms
+```text id="w5v2rp"
+GET /api/users → 200 15ms
 ```
 
-Ye automatically request duration calculate karta hai:
+The request duration is calculated using:
 
-```text
+```text id="q7r1me"
 Date.now() - startTime
 ```
 
-Agar status code `500` ya usse higher hai, request ko automatically `error` level par log karta hai.
+Responses with status codes `500` or higher are automatically logged at the `error` level.
 
 ## Default Logger
 
-File ek default:
+The module also exports a default `logger` instance.
 
-```text
-logger
-```
+It uses the default `info` level and is useful in scripts or places where a full configuration object is not available.
 
-export bhi karti hai.
-
-Ye `info` level par configured hota hai aur un places ke liye useful hai jahan complete config available nahi hai.
-
-Actual Nexus gateway pipeline me preferably `createLogger(config)` use karna chahiye.
+For the main Nexus gateway, `createLogger(config)` should be preferred so the configured logging level is respected.
 
 ## Integration
 
 ### `server.js`
 
-`server.js` logger ko import karke existing request logging ke liye use karta hai.
+`server.js` uses `createLogger()` instead of maintaining its own inline request logger.
 
-Isse old inline `logRequest()` implementation ki zarurat nahi rahti.
+This keeps request logging centralized and consistent.
 
 ### Other Modules
 
-`router.js`, `loadbalancer.js`, `healthcheck.js`, `wal.js`, `ratelimiter.js`, `auth.js`, aur `tls.js` jaise modules bhi zarurat padne par same logger use kar sakte hain.
+Modules such as:
 
-New code me direct `console.log()` avoid karna chahiye, taaki poore project ka logging behavior consistent rahe.
+* `router.js`
+* `loadbalancer.js`
+* `healthcheck.js`
+* `wal.js`
+* `ratelimiter.js`
+* `auth.js`
+* `tls.js`
+
+can use the same logger when they need to report important events.
+
+New code should use this logger instead of directly calling `console.log()`.
 
 ## Overall Summary
 
-`logger.js` Nexus ka **central logging layer** hai.
+`logger.js` is the **central logging layer** of Nexus.
 
-Iska main flow:
+Its main flow is:
 
-```text
-Config
-  ↓
+```text id="z2h4ky"
+Configuration
+     ↓
 logging.level
-  ↓
+     ↓
 createLogger()
-  ↓
-debug / info / error
-  ↓
-Level filtering
-  ↓
-Formatted console output
+     ↓
+Log Level Filtering
+     ↓
+Formatted Console Output
 ```
 
-Overall, ye file logging ko `server.js` se separate karke **consistent, configurable aur zero-dependency logging system** provide karti hai.
+It provides consistent, configurable, and dependency-free logging across the Nexus gateway.
