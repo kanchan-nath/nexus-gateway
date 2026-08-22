@@ -2,23 +2,19 @@
 
 ## Purpose
 
-`loadbalancer.js` Nexus ke liye **load balancing** handle karta hai. Ye decide karta hai ki kisi route ki request ko available backend servers me se **kis backend par bhejna hai**.
+`loadbalancer.js` is responsible for selecting which backend should handle an incoming request in Nexus.
 
-Ye 3 strategies support karta hai:
+It supports three load-balancing strategies:
 
-- **Round-robin** — backends ko turn-by-turn select karta hai.
-- **Least-connections** — jis backend par sabse kam active requests hain, use select karta hai.
-- **Weighted** — backend ke configured weight ke according selection karta hai.
+* **Round-robin** — cycles through available backends.
+* **Least-connections** — selects the backend with the fewest active connections.
+* **Weighted** — selects backends according to their configured weights.
 
-Isme koi external load-balancing library use nahi hoti; state maintain karne ke liye JavaScript `Map` aur counters use kiye gaye hain.
+The module is implemented using native JavaScript `Map` objects and counters, so no external load-balancing library is required.
 
 ## Context
 
-Nexus ke `server.js` me request aane par backend select karna hota hai. Pehle ye logic `server.js` ke andar temporary `pickBackend()` function se handle ho raha tha.
-
-Ye file us logic ko separate module me move karti hai aur multiple load-balancing strategies provide karti hai.
-
-Typical flow:
+`server.js` needs to select a backend before forwarding each request. This module separates that logic from `server.js`.
 
 ```text
 Client Request
@@ -27,58 +23,69 @@ Client Request
       ↓
 loadbalancer.js
       ↓
-Select Strategy
-      ↓
-Choose Backend
+Select Backend
       ↓
 Forward Request
 ```
 
-`config.js` se load-balancing strategy aur backend pool ki information milti hai.
+The backend pool and selected strategy come from the Nexus configuration.
 
-## Simple Analysis
+## Route State
 
-### 1. Route State
+The module maintains state separately for each route.
 
-Har route ka state `routeState` Map me maintain hota hai.
+Each route stores:
 
-State me mainly:
+* `index` — current position for round-robin.
+* `connections` — active connection count for each backend.
+* `totalWeight` — combined backend weight.
 
-- `index` → round-robin ke liye current position
-- `connections` → har backend ke active connections
-- `totalWeight` → backends ke total weights
+This allows different routes to maintain independent load-balancing state.
 
-Isse different routes ka load-balancing state separately maintain hota hai.
+## Backend Helpers
 
-### 2. Backend Helpers
+### `getBackendUrl()`
 
-`getBackendUrl()` backend entry se URL nikalta hai.
-
-Backend config dono formats support kar sakta hai:
+Extracts the backend URL from either supported configuration format:
 
 ```text
 "http://localhost:4001"
 ```
 
-ya:
+or:
 
 ```text
-{ "url": "http://localhost:4001", "weight": 3 }
+{
+  "url": "http://localhost:4001",
+  "weight": 3
+}
 ```
 
-`getBackendWeight()` weight return karta hai. Agar weight configured nahi hai, to default `1` use hota hai.
+### `getBackendWeight()`
 
-### 3. Health Check Support
+Returns the configured backend weight.
 
-`isBackendHealthy()` backend ki health check karta hai.
+If no valid weight is provided, it defaults to `1`.
 
-Agar health information available nahi hai, backend ko healthy maana jata hai.
+## Health Check Support
 
-Future me `healthcheck.js` integrate hone par unhealthy backends ko automatically skip kiya ja sakta hai.
+`isBackendHealthy()` determines whether a backend should be considered available.
 
-### 4. Round-Robin
+If no health information is provided, the backend is assumed to be healthy.
 
-`pickRoundRobin()` healthy backends ke through sequentially cycle karta hai.
+The function can work with:
+
+* An object exposing `isHealthy()`
+* A `Map`
+* A plain object
+
+This allows future integration with `healthcheck.js`.
+
+## Load-Balancing Strategies
+
+### Round-Robin
+
+`pickRoundRobin()` selects backends sequentially.
 
 Example:
 
@@ -89,11 +96,11 @@ Request 3 → Backend C
 Request 4 → Backend A
 ```
 
-`index` counter next backend decide karta hai.
+Unhealthy backends are skipped.
 
-### 5. Least-Connections
+### Least-Connections
 
-`pickLeastConnections()` har backend ke active connection count ko check karta hai.
+`pickLeastConnections()` checks the current active connection count of each healthy backend and selects the one with the lowest count.
 
 Example:
 
@@ -103,17 +110,17 @@ Backend B → 2 connections
 Backend C → 4 connections
 ```
 
-Selection:
+Result:
 
 ```text
 Backend B
 ```
 
-`incrementConnections()` aur `decrementConnections()` request lifecycle ke according counts update karte hain.
+The connection count must be updated using `incrementConnections()` and `decrementConnections()`.
 
-### 6. Weighted
+### Weighted
 
-`pickWeighted()` backend ke configured weight ke basis par selection karta hai.
+`pickWeighted()` selects a backend based on its configured weight.
 
 Example:
 
@@ -122,69 +129,17 @@ Backend A → weight 3
 Backend B → weight 1
 ```
 
-Backend A ko approximately **75%** aur Backend B ko **25%** requests milengi over a large number of requests.
+Over many requests, Backend A will receive approximately three times as many requests as Backend B.
 
-Selection ke liye `Math.random()` use hota hai.
+Selection is performed using `Math.random()`.
 
-## Main Public API
+## Main API
 
 ### `createLoadBalancer(config, healthStatus)`
 
-Load balancer instance create karta hai aur configured strategy validate karta hai.
+Creates a load-balancer instance using the strategy configured in `config.loadBalancing`.
 
-### `pickBackend(route)`
-
-Given route ke liye suitable backend return karta hai.
-
-### `incrementConnections(route, backendUrl)`
-
-Backend ka active connection count increase karta hai.
-
-### `decrementConnections(route, backendUrl)`
-
-Active connection count decrease karta hai.
-
-### `getConnections(route, backendUrl)`
-
-Current active connections return karta hai.
-
-### `withConnection(route, backendUrl, fn)`
-
-Function execute karte waqt automatically connection count manage karta hai.
-
-```text
-increment
-   ↓
-execute request
-   ↓
-decrement
-```
-
-`finally` use hone ki wajah se error aane par bhi connection count properly decrease hota hai.
-
-### `setHealthStatus()`
-
-Health-check information update karta hai.
-
-### `resetRoute()` / `resetAll()`
-
-Testing ke liye stored load-balancing state reset karte hain.
-
-## Integration with Other Files
-
-### `server.js`
-
-`server.js` ko load balancer instance create karke request handling ke time `pickBackend()` use karna hai.
-
-Least-connections ke liye request start/end par connection count bhi update karna hoga.
-
-### `healthcheck.js`
-
-Future health-check module healthy backends provide karega. Unhealthy backends ko load balancer automatically skip kar sakta hai.
-
-### `config.js`
-
-`config.js` load-balancing strategy validate karta hai:
+Supported strategies:
 
 ```text
 round-robin
@@ -192,28 +147,106 @@ least-connections
 weighted
 ```
 
-Weighted strategy ke liye backend weights configuration me provide kiye ja sakte hain.
+It also validates the configured strategy before creating the instance.
+
+### `pickBackend(route)`
+
+Returns the selected backend URL for a route.
+
+Returns `null` if the route has no valid backend pool or no healthy backend is available.
+
+### `incrementConnections(route, backendUrl)`
+
+Increases the active connection count for a backend.
+
+### `decrementConnections(route, backendUrl)`
+
+Decreases the active connection count after a request finishes.
+
+### `getConnections(route, backendUrl)`
+
+Returns the current active connection count for a backend.
+
+### `withConnection(route, backendUrl, fn)`
+
+Automatically manages connection tracking around an asynchronous operation.
+
+```text
+Increment
+   ↓
+Execute request
+   ↓
+Decrement
+```
+
+The `finally` block ensures the count is decreased even if the operation fails.
+
+### `setHealthStatus()`
+
+Updates the health information used when selecting backends.
+
+### `getStrategy()`
+
+Returns the currently configured load-balancing strategy.
+
+### `resetRoute()` / `resetAll()`
+
+Clear stored state for testing purposes.
+
+## Legacy API
+
+`pickBackend()` is also exported separately for backward compatibility with the older `server.js` implementation.
+
+If an existing load-balancer instance is provided, it uses that instance. Otherwise, it creates a temporary load balancer.
+
+## Integration
+
+### `server.js`
+
+`server.js` should create one load-balancer instance during startup and use it when handling requests.
+
+Typical flow:
+
+```text
+Request
+   ↓
+matchRoute()
+   ↓
+pickBackend()
+   ↓
+Forward Request
+```
+
+For the least-connections strategy, `server.js` must also increment the connection count when forwarding starts and decrement it when the request finishes.
+
+### `healthcheck.js`
+
+When health checking is integrated, unhealthy backends can be excluded from selection automatically.
+
+### `config.js`
+
+`config.js` validates the supported strategies and provides backend configuration, including weights for the weighted strategy.
 
 ### `metrics.js`
 
-Is file me direct changes required nahi hain. Backend select hone ke baad `server.js` metrics record kar sakta hai.
+No direct dependency is required. `server.js` can record metrics after the backend has been selected.
 
 ## Overall Summary
 
-`loadbalancer.js` Nexus ka **backend selection layer** hai.
+`loadbalancer.js` is the **backend selection layer** of Nexus.
 
-Iska main responsibility hai:
+Its responsibility is to:
 
 ```text
 Route
- ↓
+  ↓
 Backend Pool
- ↓
-Remove unhealthy backends
- ↓
-Apply configured strategy
- ↓
-Select backend
+  ↓
+Filter Unhealthy Backends
+  ↓
+Apply Load-Balancing Strategy
+  ↓
+Select Backend
 ```
 
-Ye module `server.js` ko load-balancing logic se separate rakhta hai aur future me health checks aur additional strategies integrate karne ke liye structure provide karta hai.
+It keeps load-balancing logic separate from `server.js` while supporting multiple strategies, connection tracking, health-check integration, and testing utilities without external dependencies.
