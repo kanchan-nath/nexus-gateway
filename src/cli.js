@@ -1,68 +1,14 @@
-/**
- * src/cli.js
- * -----------------------------------------------------------------------
- * PURPOSE
- *   Command-line interface for Nexus. Provides a single entrypoint:
- *     node src/cli.js start --config <path>
- *
- *   It parses process.argv manually (no yargs/commander), loads the
- *   configuration, starts the HTTP/HTTPS server(s), and keeps the
- *   process alive. This is the main entrypoint for running Nexus in
- *   production/demo mode.
- *
- *   Owner: Kanchan
- *   Zero-dep substitution: `process.argv` manual parsing replaces
- *   yargs/commander. `node:http` + `node:https` + `node:tls` replace
- *   express/HTTPS libraries.
- *
- * WHAT THIS FILE DOES
- *   - Parses CLI flags: --config, --help, --version
- *   - Loads config via loadConfig() from config.js
- *   - Creates HTTP server (and HTTPS server if configured)
- *   - Starts both servers on their respective ports
- *   - Handles graceful shutdown (SIGINT, SIGTERM)
- *   - Exits with appropriate code on error
- *
- * -----------------------------------------------------------------------
- * FUTURE INTEGRATION — what still needs to change elsewhere
- * -----------------------------------------------------------------------
- *   This file is the top-level entrypoint. It expects:
- *     1. config.js -> loadConfig() to be fully implemented (done)
- *     2. server.js -> createServer() to accept config and return
- *        an http.Server instance (done)
- *     3. tls.js -> createTLSServer() to be implemented (Phase 3)
- *        - Currently TLS is stubbed; once tls.js lands, uncomment
- *          the HTTPS server creation block below.
- *
- *   No other files need to change for this file to work.
- * -----------------------------------------------------------------------
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { createServer } from './server.js';
 
-// -------------------------------------------------------------------------
-// Package metadata (kept inline so we don't need to import package.json)
-// -------------------------------------------------------------------------
 const PACKAGE_NAME = 'nexus-gateway';
 const PACKAGE_VERSION = '1.0.0';
 
-// -------------------------------------------------------------------------
-// CLI argument parsing (manual, zero-dependency)
-// -------------------------------------------------------------------------
-
-/**
- * Parse command-line arguments. Returns an object with:
- *   - command: string (e.g. 'start')
- *   - configPath: string | null
- *   - help: boolean
- *   - version: boolean
- */
 function parseArgs(argv) {
-    const args = argv.slice(2); // remove node and script path
+    const args = argv.slice(2);
     const result = {
         command: null,
         configPath: null,
@@ -86,12 +32,11 @@ function parseArgs(argv) {
         if (arg === '--config' || arg === '-c') {
             if (i + 1 < args.length) {
                 result.configPath = args[i + 1];
-                i++; // skip the value
+                i++;
             }
             continue;
         }
 
-        // If it's not a flag, treat it as the command
         if (result.command === null && !arg.startsWith('-')) {
             result.command = arg;
         }
@@ -99,10 +44,6 @@ function parseArgs(argv) {
 
     return result;
 }
-
-// -------------------------------------------------------------------------
-// Help text
-// -------------------------------------------------------------------------
 
 function printHelp() {
     console.log(`
@@ -128,10 +69,6 @@ Environment variables:
 `);
 }
 
-// -------------------------------------------------------------------------
-// Graceful shutdown
-// -------------------------------------------------------------------------
-
 function shutdown(servers, logger, exitCode = 0) {
     if (logger) {
         logger.info('Shutting down gracefully...');
@@ -140,11 +77,14 @@ function shutdown(servers, logger, exitCode = 0) {
     }
 
     let remaining = 0;
+
     for (const server of servers) {
         if (server && server.listening) {
             remaining++;
+
             server.close(() => {
                 remaining--;
+
                 if (remaining === 0) {
                     process.exit(exitCode);
                 }
@@ -152,21 +92,15 @@ function shutdown(servers, logger, exitCode = 0) {
         }
     }
 
-    // If no servers were listening, exit immediately
     if (remaining === 0) {
         process.exit(exitCode);
     }
 
-    // Safety net: force exit after 5 seconds if something hangs
     setTimeout(() => {
         console.error('Force exit after timeout');
         process.exit(exitCode);
     }, 5000);
 }
-
-// -------------------------------------------------------------------------
-// Main entrypoint
-// -------------------------------------------------------------------------
 
 async function main() {
     const args = parseArgs(process.argv);
@@ -196,6 +130,7 @@ async function main() {
     const configPath = path.resolve(process.cwd(), args.configPath);
 
     let config;
+
     try {
         config = loadConfig(configPath);
     } catch (err) {
@@ -209,9 +144,11 @@ async function main() {
         try {
             const server = createServer(config);
             const port = config.listen.http;
+
             server.listen(port, () => {
                 server.logger.info(`Nexus listening on http://localhost:${port}`);
             });
+
             servers.push(server);
 
             if (servers.length === 1) {
@@ -228,11 +165,13 @@ async function main() {
     if (config.listen.https != null) {
         try {
             const { createTLSServer } = await import('./tls.js');
-            const httpServer = servers[0]; // reuse its context (see tls.js note)
+            const httpServer = servers[0];
             const httpsServer = createTLSServer(config, httpServer?.logger, httpServer);
+
             httpsServer.listen(config.listen.https, () => {
                 httpsServer.logger.info(`Nexus listening on https://localhost:${config.listen.https}`);
             });
+
             servers.push(httpsServer);
 
             if (servers.length === 1) {
@@ -258,7 +197,3 @@ main().catch((err) => {
     console.error(err);
     process.exit(1);
 });
-
-// -------------------------------------------------------------------------
-// Run the CLI
-// -------------------------------------------------------------------------
